@@ -503,3 +503,113 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// [新增] sys_mmap 实现
+uint64 sys_mmap(void) {
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  // 1. 获取参数 (注意：argint/argaddr 返回 void，不检查返回值)
+  argaddr(0, &addr);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  // argfd 返回 int，需要检查
+  if(argfd(4, &fd, &f) < 0) return -1;
+  argint(5, &offset);
+
+  // 2. 权限与合法性检查
+  // 如果映射为 SHARED 且请求写入，文件必须是可写的
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+
+  // 3. 寻找空闲 VMA
+  struct vma *v = 0;
+  for(int i = 0; i < 16; i++){
+    if(p->vmas[i].used == 0){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(!v) return -1;
+
+  // 4. 填充 VMA
+  v->used = 1;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->fd = fd;
+  v->f = f;
+  v->offset = offset;
+
+  // 5. 增加文件引用计数
+  filedup(f);
+
+  // 6. 分配虚拟地址空间 (简单实现：增长 p->sz)
+  v->addr = PGROUNDUP(p->sz);
+  p->sz = v->addr + PGROUNDUP(length);
+
+  return v->addr;
+}
+
+uint64 sys_munmap(void) {
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  // 获取参数
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  struct vma *v = 0;
+  // 查找包含该地址的 VMA
+  for(int i = 0; i < 16; i++) {
+    if(p->vmas[i].used && addr >= p->vmas[i].addr && addr < p->vmas[i].addr + p->vmas[i].length) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(!v) return -1;
+
+  // 计算需要处理的页范围
+  uint64 start = PGROUNDDOWN(addr);
+  uint64 end = PGROUNDUP(addr + length);
+
+  // 1. 脏页回写 (Dirty Page Writeback)
+  // 遍历范围内的每一页，检查是否为脏页
+  for(uint64 va = start; va < end; va += PGSIZE){
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if(pte && (*pte & PTE_V)) {
+      // 如果是 MAP_SHARED 且页面被修改过 (PTE_D)，写回文件
+      if((v->flags & MAP_SHARED) && (*pte & PTE_D)) {
+        begin_op();
+        ilock(v->f->ip);
+        
+        // 计算写入位置：VMA文件偏移 + (当前虚拟页 - VMA起始虚拟页)
+        uint64 off = v->offset + (va - v->addr);
+        
+        // [修复] 这里必须使用 va (虚拟地址)，因为 user_src=1
+        // 之前错误的写成了 pa，导致 writei 无法正确拷贝数据
+        if(writei(v->f->ip, 1, va, off, PGSIZE) != PGSIZE) {
+            // 可选：处理写入失败的情况
+        }
+        
+        iunlock(v->f->ip);
+        end_op();
+      }
+    }
+  }
+
+  // 2. 解除映射 (从页表中移除)
+  uvmunmap(p->pagetable, start, (end - start)/PGSIZE, 1);
+
+  // 3. 处理 VMA 结构体
+  if(addr == v->addr && length == v->length) {
+    fileclose(v->f);
+    v->used = 0;
+  }
+
+  return 0;
+}
