@@ -16,3 +16,8 @@ kernel/kernel
 user/usys.S
 .gdbinit
 TAGS
+
+# other user config
+compile_commands.json
+.cache/
+.vscode/
