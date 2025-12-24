@@ -5,6 +5,11 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+// [新增] 必须添加以下头文件，且顺序很重要
+#include "sleeplock.h" 
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -42,55 +47,79 @@ usertrap(void)
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);  //DOC: kernelvec
+  w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
-  // save user program counter.
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
-    // system call
-
+    // 系统调用
     if(killed(p))
-      kexit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
+      kexit(-1); // 原有代码使用 kexit
     p->trapframe->epc += 4;
-
-    // an interrupt will change sepc, scause, and sstatus,
-    // so enable only now that we're done with those registers.
     intr_on();
-
     syscall();
   } else if((which_dev = devintr()) != 0){
-    // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+    // 设备中断
+  } else if((r_scause() == 13 || r_scause() == 15)) { 
+    // [新增] Page Fault 处理 (13=Load, 15=Store)
+    uint64 va = r_stval(); 
+    struct vma *v = 0;
+
+    // 1. 检查 VA 是否在 VMA 范围内
+    for(int i = 0; i < 16; i++){
+      if(p->vmas[i].used && va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].length){
+        v = &p->vmas[i];
+        break;
+      }
+    }
+
+    if(v) {
+      // 2. 分配物理页
+      char *mem = kalloc();
+      if(mem == 0) {
+        setkilled(p); // 内存不足，杀掉进程
+      } else {
+        memset(mem, 0, PGSIZE);
+
+        // 3. 从磁盘读取数据
+        uint64 offset_in_file = v->offset + (PGROUNDDOWN(va) - v->addr);
+        ilock(v->f->ip);
+        readi(v->f->ip, 0, (uint64)mem, offset_in_file, PGSIZE); 
+        iunlock(v->f->ip);
+
+        // 4. 建立映射
+        int perm = PTE_U;
+        if(v->prot & PROT_READ) perm |= PTE_R;
+        if(v->prot & PROT_WRITE) perm |= PTE_W;
+        // 这里的 PTE_X 不是必须的，除非你想支持映射可执行文件
+
+        if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) < 0){
+          kfree(mem);
+          setkilled(p);
+        }
+      }
+    } else {
+      // 非法访问：打印信息并杀掉进程
+      printf("usertrap(): unexpected scause %p pid=%d\n", (void*)r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", (void*)r_sepc(), (void*)r_stval());
+      setkilled(p);
+    }
   } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    // 其他意外中断
+    printf("usertrap(): unexpected scause %p pid=%d\n", (void*)r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", (void*)r_sepc(), (void*)r_stval());
     setkilled(p);
   }
 
   if(killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
 
   prepare_return();
-
-  // the user page table to switch to, for trampoline.S
-  uint64 satp = MAKE_SATP(p->pagetable);
-
-  // return to trampoline.S; satp value in a0.
-  return satp;
+  return MAKE_SATP(p->pagetable);
 }
 
 //
