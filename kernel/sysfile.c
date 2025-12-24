@@ -503,3 +503,15 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// TODO: sys_mmap
+uint64 sys_mmap(void) {
+  // 请完成你的代码
+  return -1;
+}
+
+// TODO: sys_munmap
+uint64 sys_munmap(void) {
+  // 请完成你的代码
+  return -1;
+}
