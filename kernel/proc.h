@@ -79,6 +79,18 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+// 虚拟内存区域结构体
+struct vma {
+  int used;             // 是否使用
+  uint64 addr;          // 映射起始地址
+  int length;           // 映射长度
+  int prot;             // 权限
+  int flags;            // 标志
+  int fd;               // 文件描述符
+  struct file *f;       // 文件结构体指针
+  int offset;           // 文件内偏移
+};
+
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -91,6 +103,9 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+
+  // VMAs
+  struct vma vmas[16];
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
